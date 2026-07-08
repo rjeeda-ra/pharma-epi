@@ -1,0 +1,132 @@
+# pharma-epi-fetcher watchlist — user-maintained registry of epi-report sources.
+#
+# The skill reads this file, resolves the current report URL(s) for each source
+# via WebFetch/WebSearch (see SKILL.md "Discovery ladder"), and hands the
+# resolved URLs to fetch.py. YOU own this file — add/adjust sources here.
+#
+# Two source_type shapes:
+#   recurring  — watch `landing_url` each run for new periods (dedup vs ledger).
+#   one_off    — a single `report_url`, fetched once then deduped forever.
+#
+# Fields:
+#   id             short slug, prefixes staged files (e.g. gsk -> gsk-q1-2026.xlsx)
+#   company        display name (also the inbox subfolder)
+#   source_type    recurring | one_off
+#   landing_url    (recurring) the EXACT page that lists the reports — pin it precisely
+#   report_url     (one_off) direct link to the single report
+#   link_match     substring a link's text/href must contain to count (recurring)
+#   paginate       (recurring) optional {param, size_param, size, max_pages} for listing pages
+#   expected_format pdf | xlsx
+#   adapter_hint   matches pharma-epi-extractor/adapters/INDEX.md
+#   cadence        quarterly | annual | event | one_off  (informational)
+#   notes          freeform; record gotchas here
+
+sources:
+  - id: gsk
+    company: GSK
+    source_type: recurring
+    cadence: quarterly
+    landing_url: "https://www.gsk.com/en-gb/investors/quarterly-results/"
+    link_match: "epidemiology"          # matches "...epidemiology report/data" .xlsx links
+    paginate: {param: p, size_param: ps, size: 4, max_pages: 6}
+    expected_format: xlsx
+    adapter_hint: gsk-epidemiology-report
+    indications: []                      # multi-indication workbook; leave empty
+    notes: >-
+      Series began Q1 2023 (nothing before). Opaque media slugs — never guess a
+      URL, scan the listing. Serve host is www.gsk.com; media.gsk.com may not
+      resolve. Q1 2023 file is named "...-epidemiology-data.xlsx" (not -report),
+      so match on "epidemiology", not the full filename.
+
+  - id: novartis
+    company: Novartis
+    source_type: recurring
+    cadence: annual
+    landing_url: "https://www.novartis.com/investors/financial-data/quarterly-results"
+    link_match: "target-patient-populations"      # anchor text is "Download {year} epidemiology data"
+    expected_format: pdf
+    adapter_hint: roche-target-populations-chartdeck   # closest chart/graphic method; validate on first run
+    indications: []
+    notes: >-
+      "Target Patient Populations {year}.pdf" at /sites/novartis_com/files/.
+      CONFIRMED years: 2023, 2025, 2026 only. Series began 2023; 2020/2021/2022
+      and (oddly) 2024 were NEVER published — verified via HTTP 404 + a full
+      Wayback CDX scan of the files directory (2026-07-08). Verify each year's
+      link on the landing page; do NOT extrapolate the filename pattern. The
+      page's "Archive" tab is JS-rendered (not scrapeable via WebFetch) — read
+      the current year off the live page, older years are what's in the ledger.
+
+  - id: roche
+    company: Roche
+    source_type: recurring
+    cadence: annual                       # Pharma Day is ~annually in September
+    landing_url: "https://www.roche.com/investors/events"
+    link_match: "epi"                     # the appendix is titled "Epidemiology"/"Patient Populations"
+    expected_format: pdf
+    adapter_hint: roche-target-populations-chartdeck
+    indications: []
+    notes: >-
+      Each Roche Pharma Day (~Sept) ships a focused epi appendix — the epi doc we
+      want (NOT the giant full deck). CONFIRMED every year 2019-2025 (in ledger).
+      Titles shifted: "Patient Populations" 2019-2022 -> "Epidemiology" 2023+.
+      Opaque slugs on TWO hosts: assets.roche.com (2019, 2022+) and
+      assets.cwp.roche.com (2020-2021). Scrape the per-year Pharma Day event page
+      for the appendix link; never guess the slug. The full multi-hundred-page
+      Pharma Day decks also exist but are redundant for epi — skip unless asked.
+
+  # Sanofi has NO recurring standalone epi report. It ships a dedicated
+  # "Epidemiology" deck only sporadically, at some investor events (CMD, R&D Day,
+  # therapeutic-area days). Each confirmed deck is registered below as a one_off.
+  # Discovery for NEW ones: watch sanofi.com investor-presentation event pages for
+  # a standalone "Epidemiology" download. Verified NONE exist for 2024/2025 or the
+  # 2021 CMD / 2023 Vaccines events (as of 2026-07-08). Path pattern:
+  # sanofi.com/assets/dotcom/content-app/events/investor-presentation/<YEAR>/<event>/<file>.pdf
+  - id: sanofi-cmd-2019
+    company: Sanofi
+    source_type: one_off
+    cadence: one_off
+    report_url: "https://www.sanofi.com/assets/dotcom/content-app/events/investor-presentation/2019/Capital-Markets-Day/2019_12_10_CMD_FINAL_SLIDES_Epidemiology.pdf"
+    expected_format: pdf
+    adapter_hint: roche-target-populations-chartdeck
+    indications: []
+    notes: "2019 Capital Markets Day standalone epidemiology deck."
+
+  - id: sanofi-2020-rnd-day
+    company: Sanofi
+    source_type: one_off
+    cadence: one_off
+    report_url: "https://www.sanofi.com/assets/dotcom/content-app/events/investor-presentation/2020/R-D-DAYS-2-5--Oncology-strategy-and-ASCO-2020/20200623_RD_Day_Presentation.pdf"
+    expected_format: pdf
+    adapter_hint: roche-target-populations-chartdeck
+    indications: []
+    notes: "2020 R&D Day full deck (82pp) — no standalone epi file; embeds patient-population figures."
+
+  - id: sanofi-2021-vaccines
+    company: Sanofi
+    source_type: one_off
+    cadence: one_off
+    report_url: "https://www.sanofi.com/assets/dotcom/content-app/events/investor-presentation/2021/vaccines-investor-event/20211201---Vaccines-Investor-Event_Epidemiology.pdf"
+    expected_format: pdf
+    adapter_hint: roche-target-populations-chartdeck
+    indications: []
+    notes: "2021 Vaccines Investor Event standalone epidemiology deck (Dec 1 2021)."
+
+  - id: sanofi-2022-immunology
+    company: Sanofi
+    source_type: one_off
+    cadence: one_off
+    report_url: "https://www.sanofi.com/assets/dotcom/content-app/events/investor-presentation/2022/2022-immunology-investor-event/Epidemiology_Data_Sanofi_Immunology_Investor_Event_March_29_2022.pdf"
+    expected_format: pdf
+    adapter_hint: roche-target-populations-chartdeck
+    indications: []
+    notes: "2022 Immunology Investor Event standalone epidemiology deck (17pp, Mar 29 2022)."
+
+  - id: sanofi-2023-rnd-day
+    company: Sanofi
+    source_type: one_off
+    cadence: one_off
+    report_url: "https://www.sanofi.com/assets/dotcom/content-app/events/investor-presentation/2023/r-and-d-day-2023/r-and-d-day-2023-epidemiology-data-v2.pdf"
+    expected_format: pdf
+    adapter_hint: roche-target-populations-chartdeck
+    indications: []
+    notes: "2023 R&D Day standalone 'Epidemiology Data' deck (Dec 7 2023)."

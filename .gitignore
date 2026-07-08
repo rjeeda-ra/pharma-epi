@@ -1,0 +1,14 @@
+# OS / Python cruft
+.DS_Store
+__pycache__/
+*.pyc
+
+# Downloaded source binaries never belong in the repo — they go to Box / a local
+# inbox. Only the ledger (state) and skill code are tracked.
+*.pdf
+*.xlsx
+*.csv
+
+# Local run artifacts
+manifest*.json
+coverage.md
