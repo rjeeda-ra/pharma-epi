@@ -37,7 +37,9 @@ import mimetypes
 import os
 import re
 import ssl
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -98,38 +100,84 @@ def download(url, timeout=60):
     raise RuntimeError(f"download failed for {url}: {type(last).__name__}: {last}")
 
 
-def box_upload(data, filename, folder_id, token, timeout=120):
-    """Upload a binary to Box via the content API (multipart/form-data)."""
-    boundary = "----pharmaepifetcher7f3a2b"
+def box_upload(data, filename, folder_id, token, as_user_id=None, timeout=180):
+    """Upload a binary to Box via the content API, using curl.
+
+    We shell out to curl deliberately: on corporate-proxied machines (Netskope
+    TLS inspection) Python's OpenSSL 3.x rejects the injected CA ("CA cert does
+    not include key usage extension"), while curl uses the system trust store /
+    the CA bundle in $CURL_CA_BUNDLE and validates fine. The auth header is fed
+    via a curl config on stdin so the token never appears in the process args."""
     attributes = json.dumps({"name": filename, "parent": {"id": str(folder_id)}})
-    pre = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="attributes"\r\n\r\n'
-        f"{attributes}\r\n"
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-        f"Content-Type: application/octet-stream\r\n\r\n"
-    ).encode()
-    post = f"\r\n--{boundary}--\r\n".encode()
-    body = pre + data + post
-    req = urllib.request.Request(
-        BOX_UPLOAD_URL,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        resp = json.loads(r.read().decode())
+    with tempfile.NamedTemporaryFile(delete=False) as tf:
+        tf.write(data)
+        tmp = tf.name
+    try:
+        cmd = [
+            "curl", "-sS", "--fail-with-body", "-X", "POST", BOX_UPLOAD_URL,
+            "-F", f"attributes={attributes}",
+            "-F", f"file=@{tmp};filename={filename}",
+            "-K", "-",  # read the Authorization (and As-User) header from stdin
+        ]
+        config = f'header = "Authorization: Bearer {token}"\n'
+        if as_user_id:
+            config += f'header = "As-User: {as_user_id}"\n'
+        proc = subprocess.run(cmd, input=config, capture_output=True, text=True, timeout=timeout)
+    finally:
+        os.unlink(tmp)
+    if proc.returncode != 0:
+        raise RuntimeError(f"curl upload failed (rc={proc.returncode}): "
+                           f"{(proc.stdout or proc.stderr).strip()[:300]}")
+    try:
+        resp = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"unexpected Box response: {proc.stdout[:300]}")
+    if "entries" not in resp:
+        raise RuntimeError(f"Box upload error: {proc.stdout[:300]}")
     return resp["entries"][0]["id"]
+
+
+def run_backfill(ledger, args, token):
+    """Upload already-staged local files (ledger entries lacking box_file_id) to Box."""
+    uploaded, skipped, failed = [], [], []
+    for url, e in sorted(ledger.items()):
+        if e.get("box_file_id"):
+            skipped.append((e.get("slug"), "already has box_file_id"))
+            continue
+        lp = e.get("local_path")
+        if not lp or not os.path.isfile(lp):
+            failed.append((e.get("slug"), f"local file missing: {lp}"))
+            continue
+        try:
+            with open(lp, "rb") as fh:
+                data = fh.read()
+            fid = box_upload(data, os.path.basename(lp), args.box_folder_id, token)
+            e["box_file_id"] = fid
+            uploaded.append((e.get("slug"), fid))
+        except Exception as ex:  # noqa: BLE001 - fail loud, keep going
+            failed.append((e.get("slug"), str(ex)))
+
+    with open(args.ledger, "w") as fh:
+        json.dump(ledger, fh, indent=2, sort_keys=True)
+
+    print(f"\n=== Box backfill ===")
+    print(f"uploaded: {len(uploaded)}   skipped: {len(skipped)}   failed: {len(failed)}")
+    for slug, fid in uploaded:
+        print(f"  uploaded {slug} -> box file {fid}")
+    if failed:
+        print("FAILED:")
+        for slug, err in failed:
+            print(f"  {slug}: {err}")
+    sys.exit(1 if failed else 0)
 
 
 def main():
     ap = argparse.ArgumentParser(description="Download/dedup/manifest core for pharma-epi-fetcher.")
-    ap.add_argument("--candidates", required=True, help="JSON list of resolved report candidates.")
+    ap.add_argument("--candidates", default=None, help="JSON list of resolved report candidates.")
     ap.add_argument("--ledger", required=True, help="JSON dedup ledger (created if missing).")
+    ap.add_argument("--backfill-box", action="store_true",
+                    help="Upload already-staged local files (from the ledger) to Box and record box_file_id; "
+                         "no downloads. Requires --box-folder-id and the token env var.")
     ap.add_argument("--inbox", default=os.path.expanduser("~/Documents/Epi Source Inbox"),
                     help="Local staging dir for downloaded binaries.")
     ap.add_argument("--manifest", default=None, help="Where to write this run's manifest.json.")
@@ -141,7 +189,24 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="Resolve + dedup only; no download/upload.")
     args = ap.parse_args()
 
-    if not os.path.isfile(args.candidates):
+    ledger = {}
+    if os.path.isfile(args.ledger):
+        try:
+            ledger = json.load(open(args.ledger))
+        except json.JSONDecodeError as e:
+            die(f"ledger is not valid JSON: {e}")
+
+    # Backfill mode: upload already-staged local files to Box, record box_file_id. No downloads.
+    if args.backfill_box:
+        if not args.box_folder_id:
+            die("--backfill-box requires --box-folder-id")
+        token = os.environ.get(args.box_token_env)
+        if not token:
+            die(f"--backfill-box requires the token env var {args.box_token_env} to be set.")
+        run_backfill(ledger, args, token)
+        return
+
+    if not args.candidates or not os.path.isfile(args.candidates):
         die(f"candidates file not found: {args.candidates}")
     try:
         candidates = json.load(open(args.candidates))
@@ -150,12 +215,6 @@ def main():
     if not isinstance(candidates, list) or not candidates:
         die("candidates file must be a non-empty JSON list")
 
-    ledger = {}
-    if os.path.isfile(args.ledger):
-        try:
-            ledger = json.load(open(args.ledger))
-        except json.JSONDecodeError as e:
-            die(f"ledger is not valid JSON: {e}")
     seen_sha = {v.get("sha256") for v in ledger.values() if v.get("sha256")}
 
     box_token = None

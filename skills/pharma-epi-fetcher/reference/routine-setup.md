@@ -45,6 +45,12 @@ only after the prerequisites below are met.
 2. **Slack connector** pre-connected at `claude.ai/customize/connectors`; reference it in `mcp_connections`.
 3. **Runtime**: `python3` + `pdfplumber` + `openpyxl` available in the CCR image (extraction needs them).
 4. **Box app token as a managed CCR secret**, exposed as `BOX_API_TOKEN` (never in the repo).
+   - The Box **Custom App must be enterprise-admin-authorized** (Admin Console → Apps → Custom
+     Apps Manager → authorize by Client ID) BEFORE any token works — otherwise every call 401s with
+     `"Cannot authorize with this service"` (this gates even developer tokens). Confirmed 2026-07-08.
+   - **Box uploads must go through `curl`**, not Python: on RAC's Netskope-proxied network, Python's
+     OpenSSL 3.x rejects the injected CA (`CA cert does not include key usage extension`), while curl
+     uses the system CA bundle (`$CURL_CA_BUNDLE`). `fetch.py`'s `box_upload()` already shells out to curl.
 5. **Taxonomy as text** — the extractor reads the master's `Indication Aliases` / `Metric Type Aliases`
    tabs live; in the sandbox (no local `.xlsx`) provide them as a committed text/CSV export or via Box.
 
