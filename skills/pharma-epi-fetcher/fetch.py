@@ -137,7 +137,47 @@ def box_upload(data, filename, folder_id, token, as_user_id=None, timeout=180):
     return resp["entries"][0]["id"]
 
 
-def run_backfill(ledger, args, token):
+def box_get_token_ccg(client_id, client_secret, enterprise_id, timeout=60):
+    """Client Credentials Grant: exchange app creds for a ~60-min access token.
+    Via curl for the same Netskope reason as box_upload; secrets go through a
+    stdin config so they never appear in the process args."""
+    config = (
+        'data-urlencode = "grant_type=client_credentials"\n'
+        'data-urlencode = "box_subject_type=enterprise"\n'
+        f'data-urlencode = "box_subject_id={enterprise_id}"\n'
+        f'data-urlencode = "client_id={client_id}"\n'
+        f'data-urlencode = "client_secret={client_secret}"\n'
+    )
+    proc = subprocess.run(
+        ["curl", "-sS", "--fail-with-body", "-X", "POST",
+         "https://api.box.com/oauth2/token", "-K", "-"],
+        input=config, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Box CCG token request failed (rc={proc.returncode}): "
+                           f"{(proc.stdout or proc.stderr).strip()[:300]}")
+    try:
+        return json.loads(proc.stdout)["access_token"]
+    except Exception:
+        raise RuntimeError(f"unexpected Box token response: {proc.stdout[:200]}")
+
+
+def resolve_box_token(token_env):
+    """Return (access_token, as_user_id). Prefer a ready token in $token_env (e.g. a
+    Box Developer Token for manual runs); otherwise mint one via CCG from
+    BOX_CLIENT_ID / BOX_CLIENT_SECRET / BOX_ENTERPRISE_ID (the automated path).
+    Optional BOX_AS_USER_ID makes a CCG enterprise token act as that user."""
+    as_user = os.environ.get("BOX_AS_USER_ID")
+    tok = os.environ.get(token_env)
+    if tok:
+        return tok, as_user
+    cid, csec = os.environ.get("BOX_CLIENT_ID"), os.environ.get("BOX_CLIENT_SECRET")
+    ent = os.environ.get("BOX_ENTERPRISE_ID")
+    if cid and csec and ent:
+        return box_get_token_ccg(cid, csec, ent), as_user
+    return None, as_user
+
+
+def run_backfill(ledger, args, token, as_user=None):
     """Upload already-staged local files (ledger entries lacking box_file_id) to Box."""
     uploaded, skipped, failed = [], [], []
     for url, e in sorted(ledger.items()):
@@ -151,7 +191,7 @@ def run_backfill(ledger, args, token):
         try:
             with open(lp, "rb") as fh:
                 data = fh.read()
-            fid = box_upload(data, os.path.basename(lp), args.box_folder_id, token)
+            fid = box_upload(data, os.path.basename(lp), args.box_folder_id, token, as_user_id=as_user)
             e["box_file_id"] = fid
             uploaded.append((e.get("slug"), fid))
         except Exception as ex:  # noqa: BLE001 - fail loud, keep going
@@ -200,10 +240,11 @@ def main():
     if args.backfill_box:
         if not args.box_folder_id:
             die("--backfill-box requires --box-folder-id")
-        token = os.environ.get(args.box_token_env)
+        token, as_user = resolve_box_token(args.box_token_env)
         if not token:
-            die(f"--backfill-box requires the token env var {args.box_token_env} to be set.")
-        run_backfill(ledger, args, token)
+            die(f"--backfill-box needs Box auth: set {args.box_token_env}, or "
+                f"BOX_CLIENT_ID / BOX_CLIENT_SECRET / BOX_ENTERPRISE_ID for CCG.")
+        run_backfill(ledger, args, token, as_user)
         return
 
     if not args.candidates or not os.path.isfile(args.candidates):
@@ -217,12 +258,13 @@ def main():
 
     seen_sha = {v.get("sha256") for v in ledger.values() if v.get("sha256")}
 
-    box_token = None
+    box_token = box_as_user = None
     if args.box_folder_id and not args.dry_run:
-        box_token = os.environ.get(args.box_token_env)
+        box_token, box_as_user = resolve_box_token(args.box_token_env)
         if not box_token:
-            die(f"--box-folder-id given but env var {args.box_token_env} is empty. "
-                f"Set it (never hardcode the token) or omit --box-folder-id to stage locally.")
+            die(f"--box-folder-id given but no Box auth found. Set {args.box_token_env}, or "
+                f"BOX_CLIENT_ID / BOX_CLIENT_SECRET / BOX_ENTERPRISE_ID for CCG; "
+                f"or omit --box-folder-id to stage locally.")
 
     os.makedirs(args.inbox, exist_ok=True)
     new, skipped, failed = [], [], []
@@ -267,7 +309,7 @@ def main():
         box_file_id = None
         if box_token:
             try:
-                box_file_id = box_upload(data, fname, args.box_folder_id, box_token)
+                box_file_id = box_upload(data, fname, args.box_folder_id, box_token, as_user_id=box_as_user)
             except Exception as e:  # noqa: BLE001
                 failed.append({"slug": slug, "url": url, "error": f"downloaded OK but Box upload failed: {e}",
                                "local_path": local_path})

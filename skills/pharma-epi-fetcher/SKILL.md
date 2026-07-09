@@ -105,6 +105,25 @@ python3 <skills>/pharma-epi-fetcher/coverage.py \
 Pulls are tagged with `--project` (default `epi-master`; a per-candidate
 `project` field overrides), so coverage is grouped and filterable per project.
 
+## Box archive & auth
+
+When `--box-folder-id` is set, each fetched report is uploaded to that Box folder and its
+`box_file_id` recorded in the ledger — git holds code + ledger, **Box holds the PDFs**. Omit
+`--box-folder-id` to stage locally only. `--backfill-box` uploads already-staged files (ledger
+entries lacking a `box_file_id`) without re-downloading.
+
+Auth — env vars only, never hardcode a secret:
+- **Manual runs:** `BOX_API_TOKEN` = a Box Developer Token (~60 min, from the app's console).
+- **Automation (CCG):** set `BOX_CLIENT_ID`, `BOX_CLIENT_SECRET`, `BOX_ENTERPRISE_ID` and the script
+  mints its own token. Optional `BOX_AS_USER_ID` makes it upload *as* that user (so files land in the
+  user's folders rather than the service account's space).
+
+Two environment facts (see `reference/routine-setup.md`):
+- The Box **Custom App must be enterprise-admin-authorized**, or every call 401s
+  `"Cannot authorize with this service"` (this gates even developer tokens).
+- Uploads go through **curl**, not Python — RAC's Netskope TLS proxy injects a CA that Python's
+  OpenSSL rejects; curl uses the system bundle (`$CURL_CA_BUNDLE`).
+
 ## Unattended mode (defer, never prompt)
 
 When run headless (the cloud routine) or in batch, the extractor's normal

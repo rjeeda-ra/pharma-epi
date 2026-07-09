@@ -1,22 +1,22 @@
-# Quarterly cloud routine — setup spec (DEFERRED, not yet stood up)
+# Monthly cloud routine — setup spec
 
-This wires `pharma-epi-fetcher` to run **unattended every quarter** as a cloud
-routine (a headless CCR session), via the `schedule` skill / `RemoteTrigger`
-tool. It is documented here and intentionally **not created yet** — activate it
-only after the prerequisites below are met.
+This wires `pharma-epi-fetcher` to run **unattended monthly** as a cloud routine
+(a headless CCR session), via the `schedule` skill / `RemoteTrigger` tool.
 
 ## Cron
 
-`cron_expression: "0 9 1 */3 *"` → 09:00 on the 1st of Jan/Apr/Jul/Oct.
-(Pin explicit months `1,4,7,10` if you prefer calendar quarters exactly.)
+`cron_expression: "0 8 5 * *"` → 08:00 on the 5th of every month. Monthly (not
+quarterly) because the sources publish on different clocks — GSK quarterly, Roche
+~September, Novartis annual, Sanofi ad-hoc — so a monthly re-scan never misses a
+window by more than a few weeks. Runs are cheap idempotent no-ops when nothing is new.
 
 ## RemoteTrigger create body (shape)
 
 ```jsonc
 {
-  "name": "Quarterly epi-report pull",
+  "name": "Monthly epi-report pull",
   "enabled": true,
-  "cron_expression": "0 9 1 */3 *",
+  "cron_expression": "0 8 5 * *",
   "job_config": {
     "ccr": {
       "environment_id": "<CCR environment id>",
