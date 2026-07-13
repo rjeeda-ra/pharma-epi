@@ -1,0 +1,55 @@
+name: epi-box-sync
+
+# Reconcile the ledger against the Box archive and upload anything missing.
+# Runs in GitHub's cloud (off the RAC network — no Netskope cert issue) and holds
+# the Box credentials as Actions *secrets*. No PDFs are stored in the repo: the
+# job lists the Box folder and re-downloads only the gap from each report's URL.
+#
+# PREREQUISITES (see scheduler/README or below):
+#   - Repo secrets: BOX_CLIENT_ID, BOX_CLIENT_SECRET, BOX_ENTERPRISE_ID, BOX_FOLDER_ID
+#     (optional: BOX_AS_USER_ID to upload as a user, BOX_SUBJECT_TYPE=user)
+#   - The Box app must be allowed to WRITE the target folder (as-user enabled, or the
+#     service account added as a folder collaborator) — otherwise Box returns 403/404.
+
+on:
+  workflow_dispatch: {}        # manual / API trigger (Claude Tag can dispatch this)
+  # schedule:
+  #   - cron: "0 13 6 * *"     # optional: 6th of the month, day after the local monitor
+
+permissions:
+  contents: write              # to commit the updated ledger (recorded box_file_ids)
+
+concurrency:
+  group: epi-box-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync pending reports to Box
+        env:
+          BOX_CLIENT_ID: ${{ secrets.BOX_CLIENT_ID }}
+          BOX_CLIENT_SECRET: ${{ secrets.BOX_CLIENT_SECRET }}
+          BOX_ENTERPRISE_ID: ${{ secrets.BOX_ENTERPRISE_ID }}
+          BOX_FOLDER_ID: ${{ secrets.BOX_FOLDER_ID }}
+          BOX_SUBJECT_TYPE: ${{ secrets.BOX_SUBJECT_TYPE }}
+          BOX_AS_USER_ID: ${{ secrets.BOX_AS_USER_ID }}
+        run: |
+          python3 skills/pharma-epi-fetcher/fetch.py --sync-box \
+            --box-folder-id "$BOX_FOLDER_ID" \
+            --ledger skills/pharma-epi-fetcher/ledger.json
+
+      - name: Commit recorded box_file_ids
+        if: always()
+        run: |
+          git config user.name  "epi-box-sync[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add skills/pharma-epi-fetcher/ledger.json
+          git diff --cached --quiet || { git commit -m "box-sync: record uploaded box_file_ids [skip ci]"; git push; }

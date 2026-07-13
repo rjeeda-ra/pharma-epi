@@ -184,7 +184,7 @@ def resolve_box_token(token_env):
     if tok:
         return tok, as_user
     cid, csec = os.environ.get("BOX_CLIENT_ID"), os.environ.get("BOX_CLIENT_SECRET")
-    subj_type = os.environ.get("BOX_SUBJECT_TYPE", "enterprise")
+    subj_type = os.environ.get("BOX_SUBJECT_TYPE") or "enterprise"   # empty secret -> default
     subj_id = os.environ.get("BOX_SUBJECT_ID") or os.environ.get("BOX_ENTERPRISE_ID")
     if cid and csec and subj_id:
         return box_get_token_ccg(cid, csec, subj_id, subj_type), as_user
@@ -225,6 +225,67 @@ def run_backfill(ledger, args, token, as_user=None):
     sys.exit(1 if failed else 0)
 
 
+def box_list_folder_names(folder_id, token, as_user=None, timeout=60):
+    """Return the set of file names currently in a Box folder (paginated). Box is the
+    source of truth for 'what's already archived' — no PDFs are kept in the repo."""
+    cfg = f'header = "Authorization: Bearer {token}"\n'
+    if as_user:
+        cfg += f'header = "As-User: {as_user}"\n'
+    names, offset = set(), 0
+    while True:
+        proc = subprocess.run(
+            ["curl", "-sS", "--fail-with-body",
+             f"https://api.box.com/2.0/folders/{folder_id}/items?fields=name&limit=1000&offset={offset}", "-K", "-"],
+            input=cfg, capture_output=True, text=True, timeout=timeout, env=_curl_env())
+        if proc.returncode != 0:
+            raise RuntimeError(f"Box folder list failed (rc={proc.returncode}): {(proc.stdout or proc.stderr).strip()[:300]}")
+        d = json.loads(proc.stdout)
+        ents = d.get("entries", [])
+        names.update(e.get("name") for e in ents)
+        offset += len(ents)
+        if not ents or offset >= d.get("total_count", 0):
+            break
+    return names
+
+
+def run_sync_box(ledger, args, token, as_user=None):
+    """Reconcile the ledger against the Box folder: for each discovered report NOT
+    already in Box (by filename), re-download it from its saved URL and upload. The
+    repo never holds a PDF; Box's folder listing is the archive index."""
+    existing = box_list_folder_names(args.box_folder_id, token, as_user)
+    print(f"Box folder has {len(existing)} file(s)")
+    uploaded, skipped, failed = [], [], []
+    for url, e in sorted(ledger.items()):
+        fname = os.path.basename(e.get("local_path") or "") or f"{e.get('slug', 'file')}.bin"
+        if fname in existing:
+            skipped.append((e.get("slug"), "already in Box"))
+            continue
+        src = e.get("final_url") or e.get("url")
+        if not src:
+            failed.append((e.get("slug"), "no source url in ledger"))
+            continue
+        try:
+            data, _, _ = download(src)
+            fid = box_upload(data, fname, args.box_folder_id, token, as_user_id=as_user)
+            e["box_file_id"] = fid
+            uploaded.append((e.get("slug"), fid))
+        except Exception as ex:  # noqa: BLE001 - fail loud, keep going
+            failed.append((e.get("slug"), str(ex)))
+
+    with open(args.ledger, "w") as fh:
+        json.dump(ledger, fh, indent=2, sort_keys=True)
+
+    print(f"\n=== Box sync ===")
+    print(f"uploaded: {len(uploaded)}   already-in-box: {len(skipped)}   failed: {len(failed)}")
+    for slug, fid in uploaded:
+        print(f"  uploaded {slug} -> box file {fid}")
+    if failed:
+        print("FAILED:")
+        for slug, err in failed:
+            print(f"  {slug}: {err}")
+    sys.exit(1 if failed else 0)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Download/dedup/manifest core for pharma-epi-fetcher.")
     ap.add_argument("--candidates", default=None, help="JSON list of resolved report candidates.")
@@ -232,6 +293,9 @@ def main():
     ap.add_argument("--backfill-box", action="store_true",
                     help="Upload already-staged local files (from the ledger) to Box and record box_file_id; "
                          "no downloads. Requires --box-folder-id and the token env var.")
+    ap.add_argument("--sync-box", action="store_true",
+                    help="Cloud-friendly: list the Box folder, and for each ledger report NOT already there, "
+                         "re-download from its saved URL and upload. No local PDFs needed. Requires --box-folder-id + auth.")
     ap.add_argument("--inbox", default=os.path.expanduser("~/Documents/Epi Source Inbox"),
                     help="Local staging dir for downloaded binaries.")
     ap.add_argument("--manifest", default=None, help="Where to write this run's manifest.json.")
@@ -259,6 +323,17 @@ def main():
             die(f"--backfill-box needs Box auth: set {args.box_token_env}, or "
                 f"BOX_CLIENT_ID / BOX_CLIENT_SECRET / BOX_ENTERPRISE_ID for CCG.")
         run_backfill(ledger, args, token, as_user)
+        return
+
+    # Sync mode (cloud): diff ledger against the Box folder, upload the gap from source URLs.
+    if args.sync_box:
+        if not args.box_folder_id:
+            die("--sync-box requires --box-folder-id")
+        token, as_user = resolve_box_token(args.box_token_env)
+        if not token:
+            die(f"--sync-box needs Box auth: set {args.box_token_env}, or "
+                f"BOX_CLIENT_ID / BOX_CLIENT_SECRET / BOX_ENTERPRISE_ID for CCG.")
+        run_sync_box(ledger, args, token, as_user)
         return
 
     if not args.candidates or not os.path.isfile(args.candidates):
