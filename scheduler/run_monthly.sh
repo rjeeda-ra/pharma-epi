@@ -22,13 +22,17 @@ LOG="$LOGDIR/run-$STAMP.log"
 exec > >(tee -a "$LOG") 2>&1
 echo "=== pharma-epi monthly monitor $STAMP ==="
 
+# Hard timeout wrapper (macOS has no `timeout`): perl's alarm survives exec and
+# SIGALRMs the child if it overruns, so a hung claude -p can never wedge the job.
+with_timeout() { local s="$1"; shift; /usr/bin/perl -e 'alarm shift @ARGV; exec @ARGV' "$s" "$@"; }
+
 # Post a message to Slack via headless claude + the Slack MCP tool (message passed by
 # file to avoid quoting issues). Best-effort; never aborts the run.
 slack_notify() {
   local msg="$1" mf
   mf="$(mktemp -t epi_slack.XXXXXX)"; printf '%s\n' "$msg" > "$mf"
   echo "-- slack notify --"
-  "$CLAUDE_BIN" -p "Read the file $mf and post its exact contents as a message to Slack channel $SLACK_CHANNEL using the slack_send_message tool. Post nothing else, then stop." \
+  with_timeout 180 "$CLAUDE_BIN" -p "Read the file $mf and post its exact contents as a message to Slack channel $SLACK_CHANNEL using the slack_send_message tool. Post nothing else, then stop." \
     --model claude-sonnet-5 --allowedTools "Read" "mcp__claude_ai_Slack__slack_send_message" \
     --permission-mode acceptEdits >>"$LOG" 2>&1 && echo "slack posted" || echo "WARN: slack notify failed"
   rm -f "$mf"
@@ -49,8 +53,8 @@ valid_cand() { [ -s "$CAND" ] && "$PY" -I -c "import json,sys;a=json.load(open(s
 # Discovery with one retry (LLM discovery is nondeterministic).
 for attempt in 1 2; do
   echo "-- discovery attempt $attempt --"
-  "$CLAUDE_BIN" -p "$PROMPT" --model claude-sonnet-5 --add-dir "$REPO" \
-    --allowedTools "Read" "Write" "WebFetch" "WebSearch" --permission-mode acceptEdits >>"$LOG" 2>&1 || echo "WARN: discovery attempt $attempt non-zero"
+  with_timeout 600 "$CLAUDE_BIN" -p "$PROMPT" --model claude-sonnet-5 --add-dir "$REPO" \
+    --allowedTools "Read" "Write" "WebFetch" "WebSearch" --permission-mode acceptEdits >>"$LOG" 2>&1 || echo "WARN: discovery attempt $attempt failed/timed out"
   valid_cand && break
   echo "attempt $attempt produced no valid candidates"
 done
