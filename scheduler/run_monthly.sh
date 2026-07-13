@@ -68,8 +68,21 @@ if ! valid_cand; then
 fi
 echo "candidates: $("$PY" -I -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$CAND")"
 
-echo "-- fetch (local staging, no Box) --"
-"$PY" "$FETCHER/fetch.py" --candidates "$CAND" --ledger "$FETCHER/ledger.json" --inbox "$INBOX" --manifest "$INBOX/manifest.json"
+# Box creds (optional): if present, new reports upload to Box during fetch.
+SECRETS="$HOME/.config/pharma-epi/box.env"
+BOX_ARGS=()
+if [ -f "$SECRETS" ]; then
+  set -a; . "$SECRETS"; set +a
+  [ -n "${CURL_CA_BUNDLE:-}" ] && [ ! -f "${CURL_CA_BUNDLE}" ] && unset CURL_CA_BUNDLE
+  if [ -n "${BOX_FOLDER_ID:-}" ] && [ -n "${BOX_CLIENT_ID:-}" ]; then
+    BOX_ARGS=(--box-folder-id "$BOX_FOLDER_ID"); echo "Box upload: ON (folder $BOX_FOLDER_ID)"
+  fi
+fi
+[ ${#BOX_ARGS[@]} -eq 0 ] && echo "Box upload: OFF (staging only — no box.env creds)"
+
+echo "-- fetch --"
+"$PY" "$FETCHER/fetch.py" --candidates "$CAND" --ledger "$FETCHER/ledger.json" \
+  --inbox "$INBOX" --manifest "$INBOX/manifest.json" "${BOX_ARGS[@]}"
 rm -f "$CAND"
 
 echo "-- coverage --"
@@ -87,9 +100,9 @@ if git diff --cached --quiet; then echo "no ledger/coverage change"; else
   git commit -q -m "monitor: monthly pull $STAMP ($NEW new)" && git push -q origin main && echo "committed + pushed"; fi
 
 if [ "${NEW:-0}" -gt 0 ] 2>/dev/null; then
-  printf '%s  —  %s new: %s (run scheduler/upload_pending.sh)\n' "$STAMP" "$NEW" "$DETAILS" >> "$REPO/NEW-REPORTS.md"
-  /usr/bin/osascript -e "display notification \"$NEW new epi report(s) staged — run upload_pending.sh\" with title \"pharma-epi monitor\"" 2>/dev/null || true
-  slack_notify ":large_green_circle: *pharma-epi monitor* ($STAMP): *$NEW new* report(s) staged — $DETAILS. Run \`upload_pending.sh\` to archive to Box. Ledger + coverage committed to rjeeda-ra/pharma-epi.${FAILNOTE}"
+  printf '%s  —  %s new: %s\n' "$STAMP" "$NEW" "$DETAILS" >> "$REPO/NEW-REPORTS.md"
+  /usr/bin/osascript -e "display notification \"$NEW new epi report(s) fetched\" with title \"pharma-epi monitor\"" 2>/dev/null || true
+  slack_notify ":large_green_circle: *pharma-epi monitor* ($STAMP): *$NEW new* report(s) fetched & uploaded to Box — $DETAILS. Ledger + coverage committed to rjeeda-ra/pharma-epi.${FAILNOTE}"
 else
   slack_notify ":white_circle: *pharma-epi monitor* ($STAMP): ran OK — no new reports this month.${FAILNOTE}"
 fi
