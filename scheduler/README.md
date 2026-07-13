@@ -13,8 +13,10 @@ blocked by enterprise Box policy. So we split:
 - **`run_monthly.sh` (automatic, monthly):** headless Claude does discovery only
   (resolve current report URLs → candidates JSON; no Bash/git), then `fetch.py`
   downloads + sha256-dedups new reports into `.sources/` (no Box), `coverage.py`
-  refreshes `coverage.md`, and the ledger + coverage are committed to git. If new
-  reports appeared, it posts a macOS notification and appends `NEW-REPORTS.md`.
+  refreshes `coverage.md`, and the ledger + coverage are committed to git. Every run
+  posts a summary to **Slack #epidash-testing** (via the Slack MCP connector, using a
+  headless `claude -p` call) — green when new reports are staged, white on a quiet
+  month; new-report runs also append `NEW-REPORTS.md` and pop a macOS notification.
 - **`upload_pending.sh` (attended, one command):** you paste a fresh Box Developer
   Token and it uploads any ledger entries still missing a `box_file_id`, then
   commits the ids. The Developer Token uploads *as you*, so no CCG/collaboration.

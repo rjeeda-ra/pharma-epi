@@ -15,6 +15,7 @@ INBOX="$REPO/.sources"           # transient local staging (gitignored)
 LOGDIR="$REPO/logs"              # gitignored
 CLAUDE_BIN="$HOME/.npm-global/bin/claude"
 PY="/usr/bin/python3"            # stdlib-only scripts; avoids the pyenv shim (which hangs)
+SLACK_CHANNEL="C0BGKMJE607"      # #epidash-testing (private) — posts via the Slack MCP connector
 
 mkdir -p "$INBOX" "$LOGDIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -58,8 +59,22 @@ else
   git commit -q -m "monitor: monthly pull $STAMP ($NEW new)" && git push -q origin main && echo "committed + pushed"
 fi
 
+# --- notify: Slack (primary) + macOS + NEW-REPORTS.md ---
+DETAILS=$("$PY" -I -c "import json;m=json.load(open('$INBOX/manifest.json'));ns=m.get('new',[]);print('; '.join((str(n.get('company'))+' '+str(n.get('period'))) for n in ns))" 2>/dev/null)
 if [ "${NEW:-0}" -gt 0 ] 2>/dev/null; then
-  printf '%s  —  %s new report(s) staged in %s (run scheduler/upload_pending.sh to push to Box)\n' "$STAMP" "$NEW" "$INBOX" >> "$REPO/NEW-REPORTS.md"
-  /usr/bin/osascript -e "display notification \"$NEW new epi report(s) staged — run upload_pending.sh to send to Box\" with title \"pharma-epi monitor\"" 2>/dev/null || true
+  MSG=":large_green_circle: *pharma-epi monitor* ($STAMP): *$NEW new* report(s) staged — $DETAILS. Run \`upload_pending.sh\` to archive to Box. Ledger + coverage committed to rjeeda-ra/pharma-epi."
+  printf '%s  —  %s new report(s) staged in %s (run scheduler/upload_pending.sh to push to Box): %s\n' "$STAMP" "$NEW" "$INBOX" "$DETAILS" >> "$REPO/NEW-REPORTS.md"
+  /usr/bin/osascript -e "display notification \"$NEW new epi report(s) staged — run upload_pending.sh\" with title \"pharma-epi monitor\"" 2>/dev/null || true
+else
+  MSG=":white_circle: *pharma-epi monitor* ($STAMP): ran OK — no new reports this month."
 fi
+
+# Post to Slack via headless claude + the Slack MCP connector (message passed by file to avoid quoting issues)
+MSGFILE="$(mktemp -t epi_slack.XXXXXX)"
+printf '%s\n' "$MSG" > "$MSGFILE"
+echo "-- slack notify --"
+"$CLAUDE_BIN" -p "Read the file $MSGFILE and post its exact contents as a message to Slack channel $SLACK_CHANNEL using the slack_send_message tool. Post nothing else, then stop." \
+  --model claude-sonnet-5 --allowedTools "Read" "mcp__claude_ai_Slack__slack_send_message" --permission-mode acceptEdits \
+  >/dev/null 2>>"$LOG" && echo "slack posted" || echo "WARN: slack notify failed (see log)"
+rm -f "$MSGFILE"
 echo "=== done $STAMP (log: $LOG) ==="
