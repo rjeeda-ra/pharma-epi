@@ -11,4 +11,9 @@ __pycache__/
 
 # Local run artifacts
 manifest*.json
-coverage.md
+
+# Monitor working dirs (local only)
+.sources/
+logs/
+
+# coverage.md IS tracked — it's the versioned coverage view the monitor commits.

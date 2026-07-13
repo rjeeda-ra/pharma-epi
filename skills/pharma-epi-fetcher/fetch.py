@@ -100,6 +100,17 @@ def download(url, timeout=60):
     raise RuntimeError(f"download failed for {url}: {type(last).__name__}: {last}")
 
 
+def _curl_env():
+    """Env for curl calls: drop a stale CURL_CA_BUNDLE pointing at a missing file
+    (Netskope rotates that download periodically). With it unset, Apple's
+    /usr/bin/curl falls back to the system keychain, which trusts the corporate CA."""
+    env = os.environ.copy()
+    ca = env.get("CURL_CA_BUNDLE")
+    if ca and not os.path.isfile(ca):
+        env.pop("CURL_CA_BUNDLE", None)
+    return env
+
+
 def box_upload(data, filename, folder_id, token, as_user_id=None, timeout=180):
     """Upload a binary to Box via the content API, using curl.
 
@@ -122,7 +133,8 @@ def box_upload(data, filename, folder_id, token, as_user_id=None, timeout=180):
         config = f'header = "Authorization: Bearer {token}"\n'
         if as_user_id:
             config += f'header = "As-User: {as_user_id}"\n'
-        proc = subprocess.run(cmd, input=config, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, input=config, capture_output=True, text=True,
+                              timeout=timeout, env=_curl_env())
     finally:
         os.unlink(tmp)
     if proc.returncode != 0:
@@ -137,21 +149,22 @@ def box_upload(data, filename, folder_id, token, as_user_id=None, timeout=180):
     return resp["entries"][0]["id"]
 
 
-def box_get_token_ccg(client_id, client_secret, enterprise_id, timeout=60):
+def box_get_token_ccg(client_id, client_secret, subject_id, subject_type="enterprise", timeout=60):
     """Client Credentials Grant: exchange app creds for a ~60-min access token.
-    Via curl for the same Netskope reason as box_upload; secrets go through a
-    stdin config so they never appear in the process args."""
+    subject_type is 'enterprise' (default) or 'user'. Via curl for the same
+    Netskope reason as box_upload; secrets go through a stdin config so they
+    never appear in the process args."""
     config = (
         'data-urlencode = "grant_type=client_credentials"\n'
-        'data-urlencode = "box_subject_type=enterprise"\n'
-        f'data-urlencode = "box_subject_id={enterprise_id}"\n'
+        f'data-urlencode = "box_subject_type={subject_type}"\n'
+        f'data-urlencode = "box_subject_id={subject_id}"\n'
         f'data-urlencode = "client_id={client_id}"\n'
         f'data-urlencode = "client_secret={client_secret}"\n'
     )
     proc = subprocess.run(
         ["curl", "-sS", "--fail-with-body", "-X", "POST",
          "https://api.box.com/oauth2/token", "-K", "-"],
-        input=config, capture_output=True, text=True, timeout=timeout)
+        input=config, capture_output=True, text=True, timeout=timeout, env=_curl_env())
     if proc.returncode != 0:
         raise RuntimeError(f"Box CCG token request failed (rc={proc.returncode}): "
                            f"{(proc.stdout or proc.stderr).strip()[:300]}")
@@ -171,9 +184,10 @@ def resolve_box_token(token_env):
     if tok:
         return tok, as_user
     cid, csec = os.environ.get("BOX_CLIENT_ID"), os.environ.get("BOX_CLIENT_SECRET")
-    ent = os.environ.get("BOX_ENTERPRISE_ID")
-    if cid and csec and ent:
-        return box_get_token_ccg(cid, csec, ent), as_user
+    subj_type = os.environ.get("BOX_SUBJECT_TYPE", "enterprise")
+    subj_id = os.environ.get("BOX_SUBJECT_ID") or os.environ.get("BOX_ENTERPRISE_ID")
+    if cid and csec and subj_id:
+        return box_get_token_ccg(cid, csec, subj_id, subj_type), as_user
     return None, as_user
 
 
